@@ -4,7 +4,6 @@ var TRAIN_TRIF = ee.FeatureCollection("projects/ee-christianbrenes75/assets/trai
     S2_TRIF = ee.Image("projects/ee-christianbrenes75/assets/s2_mos");
 //===================================================================================================
 
-
 // ==================================================================
 // RANDOM FOREST (para clasificación de uso y cobertura de la tierra)
 // ==================================================================
