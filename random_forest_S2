@@ -1,0 +1,167 @@
+//ASSETS
+// ==================================================================================================
+var TRAIN_TRIF = ee.FeatureCollection("projects/ee-christianbrenes75/assets/train_301024_ptos"),
+    S2_TRIF = ee.Image("projects/ee-christianbrenes75/assets/s2_mos");
+//===================================================================================================
+
+
+// ==================================================================
+// RANDOM FOREST (para clasificación de uso y cobertura de la tierra)
+// ==================================================================
+
+/* Este fue el algortimo usado para la elaborar el mapa de uso y cobertura de la 
+tierra del Trifinio, 2024.
+autor: Cristian Brenes P. christian.brenes75@gmail.com -*/
+
+// ---------------------------
+// CONFIGURACIÓN
+// ---------------------------
+
+/*tome en cuenta que esta versi´ón funciona con un mosaico de imagenes Sentinel-2 creado previamente.
+ Puede crear su propio mosaico de imagenes usando la colecci´ón de imagenes S2 directamente de los catalogos de GEE*/
+
+//Bandas a utilizar del mosaico de S2
+var bands_to_use = ['b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7'];
+
+// ------------------------------------------------------------------------------------------------------------------------
+// Campo de clases (cod_2 es el nombre de campo de la tabla de atributos de los datos de entranamiento)
+var landcover_labels = 'cod_2';
+// si utiliza sus propios datos de entramiento debe cambiar el nombre de campo de acuerdo a su tabla
+
+// ------------------------------------------------------------------------------------------------------------------------
+// Visualización Sentinel-2
+var S2_viz = {bands: ['b4', 'b3', 'b2'], min: 0, max: 3000};
+
+// ------------------------------------------------------------------------------------------------------------------------
+// Paleta como arreglo JS (cliente) -> para Map.addLayer()
+var palette_landcover_js = [
+  '25CF1C', // 1 BOSQUE LATIFOLIADO
+  '006400', // 2 BOSQUE DE CONIFERAS
+  '8FBC8F', // 3 BOSQUE MIXTO
+  'FFD700', // 4 MATORRAL/GUAMIL
+  '556B2F', // 5 PLANTACIÓN FORESTAL
+  '7CFC00', // 6 PASTOS
+  '32CD32', // 7 CULTIVOS ANUALES
+  'ADFF2F', // 8 CULTIVOS PERENNES
+  '228B22', // 9 CAFÉ
+  '808080', // 10 UAH
+  'A52A2A', // 11 SUELO DESNUDO
+  '4682B4', // 12 CUERPOS AGUA
+  'FF4500', // 13 ASENTAMIENTOS
+  'F0E68C', // 14 NUBES
+  '708090'  // 15 SOMBRAS
+];
+
+//Estos son los codigos y nombres los usos/coberturas del set de datos de entrenamiento
+//Tenga en cuenta que esta es una leyenda de trabajo, y no necesariamente son las clases del producto final
+
+// ------------------------------------------------------------------------------------------------------------------------
+// Paleta como ee.List (server) -> para estilos en FeatureCollection
+var palette_landcover = ee.List(palette_landcover_js);
+
+// ------------------------------------------------------------------------------------------------------------------------
+
+// Valores esperados de clases (1..15)
+var values_landcover = ee.List([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+
+// ---------------------------
+// MAPA BASE
+// ---------------------------
+
+Map.centerObject(S2_TRIF, 10);
+Map.addLayer(S2_TRIF, S2_viz, 'Sentinel-2 Image');
+
+// ---------------------------
+// COLOREAR PUNTOS DE ENTRENAMIENTO (solo visualización)
+// ---------------------------
+
+var training_points_withcolors = TRAIN_TRIF.map(function(f) {
+  var klass = f.get(landcover_labels);
+  var index = values_landcover.indexOf(klass);
+  return f.set({stylez: {color: palette_landcover.get(index)}});
+});
+
+// ------------------------------------------------------------------------------------------------------------------------
+
+// IMPORTANTE: limitar para evitar el error de >5000 elementos en el visor
+var pts_vis = training_points_withcolors
+  .randomColumn('r')
+  .sort('r')
+  .limit(2000);
+
+Map.addLayer(pts_vis.style({styleProperty: "stylez"}), {}, 'Training Points (random 2000)');
+
+// ---------------------------
+// EXTRAER VALORES ESPECTRALES EN PUNTOS
+// ---------------------------
+
+var training_extract = S2_TRIF.select(bands_to_use).sampleRegions({
+  collection: TRAIN_TRIF,
+  properties: [landcover_labels],
+  scale: 10,
+  tileScale: 4
+});
+
+print('Training Extract (size):', training_extract.size());
+print('Training Extract (first 100):', training_extract.limit(100));
+
+// ---------------------------
+// TRAIN / VALIDACIÓN
+// ---------------------------
+
+var split = 0.8;
+var withRandom = training_extract.randomColumn('random');
+var trainingSet = withRandom.filter(ee.Filter.lt('random', split));
+var validationSet = withRandom.filter(ee.Filter.gte('random', split));
+
+print('TrainingSet size:', trainingSet.size());
+print('ValidationSet size:', validationSet.size());
+
+// ---------------------------
+// RANDOM FOREST
+// ---------------------------
+
+var numTrees = 250; // ajustable
+var trained_RF = ee.Classifier.smileRandomForest(numTrees)
+  .train({
+    features: trainingSet,
+    classProperty: landcover_labels,
+    inputProperties: bands_to_use
+  });
+
+var classified_RF = S2_TRIF.select(bands_to_use).classify(trained_RF);
+
+Map.addLayer(classified_RF, {
+  min: 1,
+  max: 15,
+  palette: palette_landcover_js
+}, 'RF Classification');
+
+// ---------------------------
+// EVALUACIÓN 
+// ---------------------------
+
+//Esta es la evaluaci´ón de los entrenados para crear el mapa de salida, no corresponde a una validaci´ón de la clasificaci´ón tem´ática  final
+var validation = validationSet.classify(trained_RF);
+var errorMatrix = validation.errorMatrix(landcover_labels, 'classification');
+
+print('Matriz de error:', errorMatrix);
+print('Precisión general (OA):', errorMatrix.accuracy());
+print('Kappa:', errorMatrix.kappa());
+print('Precisión del productor (PA):', errorMatrix.producersAccuracy());
+print('Precisión del usuario (UA):', errorMatrix.consumersAccuracy());
+
+// ---------------------------
+// EXPORTAR A DRIVE
+// ---------------------------
+
+Export.image.toDrive({
+  image: classified_RF,
+  description: 'RF_Classification_2024_trifinio',
+  folder: '2024_trifinio',
+  scale: 10,
+  region: S2_TRIF.geometry(),
+  maxPixels: 1e13
+});
+
+// ------------------------------------------------------------------------------------------------------------------------
